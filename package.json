@@ -42,6 +42,43 @@
         "command": "hunkwise.refresh",
         "title": "hunkwise: Refresh State",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "hunkwise.openDiffForCurrentFile",
+        "title": "hunkwise: Open Diff for Current File",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "hunkwise.acceptHunkAtCursor",
+        "title": "hunkwise: Accept Hunk at Cursor",
+        "icon": "$(check)"
+      },
+      {
+        "command": "hunkwise.discardHunkAtCursor",
+        "title": "hunkwise: Discard Hunk at Cursor",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "hunkwise.acceptAll",
+        "title": "hunkwise: Accept All",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "hunkwise.discardAll",
+        "title": "hunkwise: Discard All",
+        "icon": "$(discard)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "hunkwise.acceptAll",
+        "key": "ctrl+k ctrl+a",
+        "mac": "cmd+k cmd+a"
+      },
+      {
+        "command": "hunkwise.discardAll",
+        "key": "ctrl+k ctrl+d",
+        "mac": "cmd+k cmd+d"
       }
     ],
     "menus": {

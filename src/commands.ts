@@ -4,7 +4,7 @@ import * as path from 'path';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { ReviewPanel } from './reviewPanel';
-import { computeHunks, hunkId } from './diffEngine';
+import { computeHunks, hunkId, ParsedHunk } from './diffEngine';
 import { upsertGitignore } from './gitignoreManager';
 import { log } from './log';
 
@@ -42,6 +42,51 @@ export function registerCommands(
         (fp, isDir) => fileWatcher.shouldIgnore(fp, isDir)
       );
       onStateChanged();
+    }),
+    vscode.commands.registerCommand('hunkwise.acceptHunkAtCursor', () => {
+      const target = resolveHunkAtCursor(stateManager);
+      if (!target) return;
+      acceptHunk(stateManager, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+    }),
+    vscode.commands.registerCommand('hunkwise.discardHunkAtCursor', async () => {
+      const target = resolveHunkAtCursor(stateManager);
+      if (!target) return;
+      await discardHunk(stateManager, fileWatcher, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+    }),
+    vscode.commands.registerCommand('hunkwise.acceptAll', async () => {
+      const fileCount = stateManager.getAllFiles().size;
+      if (fileCount === 0) {
+        vscode.window.showInformationMessage('hunkwise: no pending changes.');
+        return;
+      }
+      await acceptAllFiles(stateManager, onStateChanged);
+    }),
+    vscode.commands.registerCommand('hunkwise.discardAll', async () => {
+      const fileCount = stateManager.getAllFiles().size;
+      if (fileCount === 0) {
+        vscode.window.showInformationMessage('hunkwise: no pending changes.');
+        return;
+      }
+      const choice = await vscode.window.showWarningMessage(
+        `Discard all changes in ${fileCount} file${fileCount === 1 ? '' : 's'}? This cannot be undone.`,
+        { modal: true },
+        'Discard All'
+      );
+      if (choice !== 'Discard All') return;
+      await discardAllFiles(stateManager, fileWatcher, onStateChanged);
+    }),
+    vscode.commands.registerCommand('hunkwise.openDiffForCurrentFile', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== 'file') {
+        vscode.window.showInformationMessage('hunkwise: no active file to diff.');
+        return;
+      }
+      const filePath = editor.document.uri.fsPath;
+      if (!stateManager.getFile(filePath)) {
+        vscode.window.showInformationMessage('hunkwise: this file has no pending changes.');
+        return;
+      }
+      await reviewPanel.openDiffEditor(filePath);
     }),
   );
 }
@@ -93,11 +138,79 @@ export async function discardAllFiles(
   fileWatcher: FileWatcher,
   onStateChanged: () => void
 ): Promise<void> {
-  for (const [filePath] of Array.from(stateManager.getAllFiles().entries())) {
-    try {
-      await discardFileByPath(stateManager, fileWatcher, filePath, () => {});
-    } catch (err) { log(`discardAllFiles: failed to restore ${filePath}: ${err}`); }
+  const allFiles = Array.from(stateManager.getAllFiles().entries());
+  if (allFiles.length === 0) return;
+
+  for (const [filePath] of allFiles) {
+    fileWatcher.markSelfEdit(filePath);
   }
+
+  try {
+    const edit = new vscode.WorkspaceEdit();
+    const docsToSave: vscode.TextDocument[] = [];
+    const externalRestores: { filePath: string; baseline: string }[] = [];
+    const filesToRemove: string[] = [];
+    const filesToExitReviewing: string[] = [];
+
+    for (const [filePath, fileState] of allFiles) {
+      const uri = vscode.Uri.file(filePath);
+
+      if (fileState.baseline === null) {
+        // New file (didn't exist in baseline) — delete via WorkspaceEdit.
+        if (fs.existsSync(filePath)) {
+          edit.deleteFile(uri, { ignoreIfNotExists: true });
+        }
+        filesToRemove.push(filePath);
+        continue;
+      }
+
+      if (!fs.existsSync(filePath)) {
+        // Externally deleted file — restore via fs (doc is closed; can't go through WorkspaceEdit cleanly).
+        externalRestores.push({ filePath, baseline: fileState.baseline });
+        filesToExitReviewing.push(filePath);
+        continue;
+      }
+
+      // Normal case: replace contents with baseline. Bundled into the single WorkspaceEdit
+      // so all per-file replacements collapse into one undo entry.
+      const doc = await vscode.workspace.openTextDocument(uri);
+      const fullRange = new vscode.Range(
+        new vscode.Position(0, 0),
+        new vscode.Position(doc.lineCount - 1, doc.lineAt(doc.lineCount - 1).text.length)
+      );
+      edit.replace(uri, fullRange, fileState.baseline);
+      docsToSave.push(doc);
+      filesToExitReviewing.push(filePath);
+    }
+
+    const applied = await vscode.workspace.applyEdit(edit);
+    log(`discardAllFiles: applyEdit=${applied}`);
+    if (!applied) {
+      log('discardAllFiles: applyEdit failed');
+      return;
+    }
+
+    for (const doc of docsToSave) {
+      try { await doc.save(); } catch (err) { log(`discardAllFiles: save failed for ${doc.uri.fsPath}: ${err}`); }
+    }
+
+    for (const { filePath, baseline } of externalRestores) {
+      try {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(filePath, baseline, 'utf-8');
+      } catch (err) {
+        log(`discardAllFiles: restore failed for ${filePath}: ${err}`);
+      }
+    }
+
+    for (const filePath of filesToRemove) stateManager.removeFile(filePath);
+    for (const filePath of filesToExitReviewing) stateManager.exitReviewing(filePath);
+  } finally {
+    for (const [filePath] of allFiles) {
+      fileWatcher.clearSelfEdit(filePath);
+    }
+  }
+
   onStateChanged();
 }
 
@@ -223,6 +336,46 @@ export function acceptHunk(
   }
   onStateChanged();
   log(`acceptHunk(${basename}): done`);
+}
+
+// Locate the hunk most relevant to the active editor's cursor. Picks a hunk
+// whose green block (added lines) contains the cursor line; otherwise the
+// nearest hunk by line distance. Returns undefined and surfaces a friendly
+// message if there's no active file, no fileState, or no hunks.
+function resolveHunkAtCursor(
+  stateManager: StateManager,
+): { filePath: string; hunk: ParsedHunk } | undefined {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.scheme !== 'file') {
+    vscode.window.showInformationMessage('hunkwise: no active file.');
+    return undefined;
+  }
+  const filePath = editor.document.uri.fsPath;
+  const fileState = stateManager.getFile(filePath);
+  if (!fileState) {
+    vscode.window.showInformationMessage('hunkwise: this file has no pending changes.');
+    return undefined;
+  }
+  const hunks = computeHunks(fileState.baseline, editor.document.getText());
+  if (hunks.length === 0) {
+    vscode.window.showInformationMessage('hunkwise: no hunks in this file.');
+    return undefined;
+  }
+  const cursorLine = editor.selection.active.line; // 0-based
+  for (const h of hunks) {
+    const start0 = h.newStart - 1;
+    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
+    if (cursorLine >= start0 && cursorLine <= end0) return { filePath, hunk: h };
+  }
+  let best: ParsedHunk | undefined;
+  let bestDist = Infinity;
+  for (const h of hunks) {
+    const start0 = h.newStart - 1;
+    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
+    const dist = cursorLine < start0 ? start0 - cursorLine : cursorLine - end0;
+    if (dist < bestDist) { bestDist = dist; best = h; }
+  }
+  return best ? { filePath, hunk: best } : undefined;
 }
 
 /** Reveal the next hunk in the editor after an accept/discard operation. */

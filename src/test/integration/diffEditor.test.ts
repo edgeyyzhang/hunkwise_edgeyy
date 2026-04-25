@@ -160,19 +160,19 @@ suite('hunkwise diff editor integration', function () {
 
   // ── CodeLens visibility ────────────────────────────────────────────────────
 
-  test('CodeLens only appears when hunkwise diff tab is active', async () => {
+  test('CodeLens appears in the normal editor for files in reviewing state', async () => {
     const filePath = await setupReviewingFile(
       'codelens-test.txt',
       'line 1\n',
       'changed line 1\n'
     );
 
-    // Open normal editor first — no CodeLens expected
+    // Open normal editor — CodeLens should now appear (the inline action bar
+    // was replaced by CodeLens to avoid the editor-insets wrap bug).
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
     await vscode.window.showTextDocument(doc);
     await sleep(300);
 
-    // Get CodeLens from the provider
     const codeLenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
       'vscode.executeCodeLensProvider', vscode.Uri.file(filePath)
     );
@@ -181,6 +181,6 @@ suite('hunkwise diff editor integration', function () {
       l => l.command?.command === 'hunkwise.codeLensAcceptHunk'
         || l.command?.command === 'hunkwise.codeLensDiscardHunk'
     );
-    assert.strictEqual(hunkwiseLenses.length, 0, 'No hunkwise CodeLens in normal editor');
+    assert.strictEqual(hunkwiseLenses.length, 2, 'Expected one Accept and one Discard lens for the single hunk');
   });
 });

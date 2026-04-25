@@ -321,7 +321,7 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
     }
   }
 
-  private async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
+  async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
     const fileName = path.basename(filePath);
     const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' });
     const currentUri = vscode.Uri.file(filePath);

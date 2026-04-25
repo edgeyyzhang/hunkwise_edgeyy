@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { FileState } from './types';
-import { HunkwiseGit } from './hunkwiseGit';
+import { HunkwiseGit, ColorOverrides, DEFAULT_COLORS } from './hunkwiseGit';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 
@@ -28,6 +28,7 @@ export class StateManager {
   private _quoteRotationInterval: number = 30;
   private _useDiffEditor: boolean = false;
   private _showInlineDecorations: boolean = true;
+  private _colors: ColorOverrides = { ...DEFAULT_COLORS };
   private _git: HunkwiseGit | undefined;
 
   // Serial queue: git ops run one at a time; flush() awaits the tail
@@ -55,6 +56,7 @@ export class StateManager {
   get quoteRotationInterval(): number { return this._quoteRotationInterval; }
   get useDiffEditor(): boolean { return this._useDiffEditor; }
   get showInlineDecorations(): boolean { return this._showInlineDecorations; }
+  get colors(): ColorOverrides { return this._colors; }
   get dir(): string | undefined { return this.hunkwiseDir; }
   get git(): HunkwiseGit | undefined { return this._git; }
 
@@ -130,6 +132,7 @@ export class StateManager {
     this._quoteRotationInterval = settings.quoteRotationInterval;
     this._useDiffEditor = settings.useDiffEditor;
     this._showInlineDecorations = settings.showInlineDecorations;
+    this._colors = settings.colors;
 
     // Initialize git (idempotent) then restore in-memory state from HEAD
     await g.initGit();
@@ -422,6 +425,7 @@ export class StateManager {
       this._quoteRotationInterval = merged.quoteRotationInterval;
       this._useDiffEditor = merged.useDiffEditor;
       this._showInlineDecorations = merged.showInlineDecorations;
+      this._colors = merged.colors;
     } else {
       this.state.clear();
       this._git?.destroyGit();
@@ -475,7 +479,7 @@ export class StateManager {
   }
 
   private currentSettings() {
-    return { ignorePatterns: this._ignorePatterns, respectGitignore: this._respectGitignore, clearOnBranchSwitch: this._clearOnBranchSwitch, quoteRotationInterval: this._quoteRotationInterval, useDiffEditor: this._useDiffEditor, showInlineDecorations: this._showInlineDecorations };
+    return { ignorePatterns: this._ignorePatterns, respectGitignore: this._respectGitignore, clearOnBranchSwitch: this._clearOnBranchSwitch, quoteRotationInterval: this._quoteRotationInterval, useDiffEditor: this._useDiffEditor, showInlineDecorations: this._showInlineDecorations, colors: this._colors };
   }
 
   setIgnorePatterns(patterns: string[]): void {
@@ -536,6 +540,7 @@ export class StateManager {
     this._quoteRotationInterval = settings.quoteRotationInterval;
     this._useDiffEditor = settings.useDiffEditor;
     this._showInlineDecorations = settings.showInlineDecorations;
+    this._colors = settings.colors;
     return this._ignorePatterns;
   }
 
@@ -704,6 +709,7 @@ export class StateManager {
     this._ignorePatterns = [...DEFAULT_IGNORE_PATTERNS];
     this._useDiffEditor = false;
     this._showInlineDecorations = true;
+    this._colors = { ...DEFAULT_COLORS };
     this.state.clear();
     this._git = undefined;
     this.gitQueue = Promise.resolve();

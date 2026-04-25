@@ -6,6 +6,40 @@ import { normalizePath } from './pathNormalize';
 
 const execFileAsync = promisify(execFile);
 
+// Color overrides applied to inline decorations and inset HTML. Empty string
+// means "use the existing built-in/theme default" — that's the sentinel.
+export interface ColorOverrides {
+  acceptButtonBackground: string;
+  acceptButtonForeground: string;
+  discardButtonBackground: string;
+  discardButtonForeground: string;
+  addedLineBackground: string;
+  addedWordBackground: string;
+  removedLineBackground: string;
+  removedWordBackground: string;
+}
+
+export const DEFAULT_COLORS: ColorOverrides = {
+  acceptButtonBackground: '',
+  acceptButtonForeground: '',
+  discardButtonBackground: '',
+  discardButtonForeground: '',
+  addedLineBackground: '',
+  addedWordBackground: '',
+  removedLineBackground: '',
+  removedWordBackground: '',
+};
+
+function parseColors(raw: unknown): ColorOverrides {
+  const src = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {};
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(DEFAULT_COLORS) as (keyof ColorOverrides)[]) {
+    const v = src[key];
+    out[key] = typeof v === 'string' ? v : '';
+  }
+  return out as unknown as ColorOverrides;
+}
+
 interface Settings {
   ignorePatterns: string[];
   respectGitignore: boolean;
@@ -13,6 +47,7 @@ interface Settings {
   quoteRotationInterval: number;
   useDiffEditor: boolean;
   showInlineDecorations: boolean;
+  colors: ColorOverrides;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -22,6 +57,7 @@ const DEFAULT_SETTINGS: Settings = {
   quoteRotationInterval: 30,
   useDiffEditor: false,
   showInlineDecorations: true,
+  colors: { ...DEFAULT_COLORS },
 };
 
 /**
@@ -99,9 +135,14 @@ export class HunkwiseGit {
         showInlineDecorations: typeof parsed.showInlineDecorations === 'boolean'
           ? parsed.showInlineDecorations
           : DEFAULT_SETTINGS.showInlineDecorations,
+        colors: parseColors(parsed.colors),
       };
     } catch {
-      return { ...DEFAULT_SETTINGS, ignorePatterns: [...DEFAULT_SETTINGS.ignorePatterns] };
+      return {
+        ...DEFAULT_SETTINGS,
+        ignorePatterns: [...DEFAULT_SETTINGS.ignorePatterns],
+        colors: { ...DEFAULT_COLORS },
+      };
     }
   }
 

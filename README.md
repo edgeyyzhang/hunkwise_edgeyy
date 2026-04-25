@@ -8,7 +8,7 @@
 <p align="center"><em>Your future self will thank you. Or blame you. It depends on the diff.</em></p>
 <!-- markdownlint-enable MD033 -->
 
-Per-hunk Accept/Discard for any file change in VSCode.
+> **This is my personal adaptation of [molon/hunkwise](https://github.com/molon/hunkwise).** 
 
 AI coding tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenCode](https://github.com/anomalyco/opencode), and other CLI/plugin-based assistants lack a native IDE — unlike Cursor, Windsurf, or Copilot, they have no built-in way to review changes hunk by hunk.
 
@@ -25,6 +25,58 @@ AI coding tools like [Claude Code](https://docs.anthropic.com/en/docs/claude-cod
 - New files and deleted files are tracked and displayed
 - State persisted across VSCode restarts via a lightweight internal git repo
 - Respects `.gitignore` and custom ignore patterns
+
+## What's different from upstream
+
+The items below are what this fork adds or changes compared to [molon/hunkwise](https://github.com/molon/hunkwise).
+
+### Change Accept / Discard to codeLens buttons between the old/new lines
+
+The `Accept / Discard` chip can land between wrapped rows of a single logical line. 
+
+The button labels use a bolder sans-serif style with heavy check and cross glyphs for better visibility:
+
+```
+✔ 𝗔𝗰𝗰𝗲𝗽𝘁    ✘ 𝗗𝗶𝘀𝗰𝗮𝗿𝗱
+```
+
+### Inline deletion marker in modified lines
+
+When a word is removed from a line without a matching replacement at the same position, upstream only indicates this in the red "deleted" inset above the line. You can see *what* was removed but not *where* in the modified line the removal occurred.
+
+This fork adds a thin vertical marker directly in the modified line at the exact column of each deletion, so the location of the removal is visible inline. The marker's color matches the added-text highlight color in the same row, so it sits within the line's existing visual palette. Consecutive deletions at the same spot are collapsed into a single marker.
+
+### Accept All / Discard All keyboard shortcuts
+
+Upstream only exposes Accept All / Discard All through the sidebar panel. This fork adds first-class commands with keybindings so you can run them from anywhere in VS Code without opening the panel.
+
+| Command | Mac | Win / Linux | Notes |
+| ------- | --- | ----------- | ----- |
+| `hunkwise: Accept All` | `Cmd+K Cmd+A` | `Ctrl+K Ctrl+A` | No confirmation — accepting is non-destructive |
+| `hunkwise: Discard All` | `Cmd+K Cmd+D` | `Ctrl+K Ctrl+D` | Modal confirmation with file count before proceeding |
+
+Chord bindings (`Cmd+K` prefix) were chosen to reduce the chance of an accidental Discard All. Both commands also appear in the Command Palette.
+
+### Single-undo Discard All
+
+In upstream, running Discard All applies the revert file-by-file — each `Cmd+Z` / `Ctrl+Z` only undoes the most recent file. This fork bundles the whole operation so that **one undo restores every modified and new file at once**.
+
+Note: files that were externally deleted and get restored by Discard All are outside the VS Code undo system; those aren't covered by the single-undo behavior.
+
+### Accept / Discard hunk at cursor
+
+Two additional commands let you act on the hunk containing (or nearest to) the cursor without using the mouse:
+
+| Command | What it does |
+| ------- | ------------ |
+| `hunkwise: Accept Hunk at Cursor` | Accepts the hunk under the cursor |
+| `hunkwise: Discard Hunk at Cursor` | Discards the hunk under the cursor |
+
+Useful for assigning your own keybindings to accept/discard individual hunks from the keyboard.
+
+### Customizable diff colors
+
+The extension's settings panel (gear icon → Settings) exposes color overrides for the added-line background, added-word highlight, removed-line background, and removed-word highlight. Empty values fall back to VS Code's `diffEditor.*` theme tokens, so by default everything follows your theme.
 
 ## Installation
 
@@ -70,6 +122,10 @@ You can drag both the hunkwise panel and the Claude Code panel into the Chat pan
 | `hunkwise: Enable` | Enable hunkwise and snapshot the workspace |
 | `hunkwise: Disable` | Disable hunkwise and clear all state |
 | `hunkwise: Settings` | Open the settings panel |
+| `hunkwise: Accept Hunk at Cursor` | Accept the hunk containing (or nearest to) the cursor |
+| `hunkwise: Discard Hunk at Cursor` | Discard the hunk containing (or nearest to) the cursor |
+| `hunkwise: Accept All` | Accept every pending hunk across all files (no confirmation) — `Cmd+K Cmd+A` / `Ctrl+K Ctrl+A` |
+| `hunkwise: Discard All` | Discard every pending hunk across all files (confirmation modal) — `Cmd+K Cmd+D` / `Ctrl+K Ctrl+D` |
 
 ## Settings
 

@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
 import { StateManager } from './stateManager';
-import { computeHunks, hunkId } from './diffEngine';
+import { computeHunks, hunkId, WordRange } from './diffEngine';
+import { ColorOverrides } from './hunkwiseGit';
 import { log } from './log';
 
-// ── Added lines ──────────────────────────────────────────────────────────────
-const addedLineDecoration = vscode.window.createTextEditorDecorationType({
-  backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
-  isWholeLine: true,
-});
+// Strip CSS-breaking characters so user-supplied color strings can't escape an
+// inline style attribute or rule body. Allows hex, named colors, rgb/rgba,
+// hsl/hsla, percentages, and whitespace.
+function sanitizeCssColor(s: string): string {
+  return s.replace(/[<>"';{}\\]/g, '');
+}
 
 // ── HTML helpers ─────────────────────────────────────────────────────────────
 function escapeHtml(s: string): string {
@@ -18,74 +20,54 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
+// Render a single removed line, splicing <span class="word-changed"> around any
+// sub-line ranges that diffWordsWithSpace reported as changed.
+function renderRemovedLineHtml(line: string, ranges: WordRange[]): string {
+  if (ranges.length === 0) return escapeHtml(line);
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  let out = '';
+  let cursor = 0;
+  for (const r of sorted) {
+    if (r.start > cursor) out += escapeHtml(line.slice(cursor, r.start));
+    out += `<span class="word-changed">${escapeHtml(line.slice(r.start, r.end))}</span>`;
+    cursor = r.end;
+  }
+  if (cursor < line.length) out += escapeHtml(line.slice(cursor));
+  return out;
+}
+
 // ── Deleted-lines inset ───────────────────────────────────────────────────────
-function buildDeletedHtml(lines: string[], tabSize: number): string {
-  const rows = lines.map(l => `<div class="line">${escapeHtml(l)}</div>`).join('');
-  return `<!DOCTYPE html><html style="background:var(--vscode-diffEditor-removedLineBackground,rgba(255,0,0,0.1))"><head>
+function buildDeletedHtml(lines: string[], tabSize: number, wordRanges: WordRange[], colors: ColorOverrides): string {
+  const byLine = new Map<number, WordRange[]>();
+  for (const r of wordRanges) {
+    const list = byLine.get(r.lineOffset);
+    if (list) list.push(r); else byLine.set(r.lineOffset, [r]);
+  }
+  const rows = lines.map((l, i) =>
+    `<div class="line">${renderRemovedLineHtml(l, byLine.get(i) ?? [])}</div>`
+  ).join('');
+  const lineBg = colors.removedLineBackground
+    ? sanitizeCssColor(colors.removedLineBackground)
+    : 'var(--vscode-diffEditor-removedLineBackground, rgba(255,0,0,0.1))';
+  const wordBg = colors.removedWordBackground
+    ? sanitizeCssColor(colors.removedWordBackground)
+    : 'var(--vscode-diffEditor-removedTextBackground, rgba(255,0,0,0.35))';
+  return `<!DOCTYPE html><html style="background:${lineBg}"><head>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; overflow: hidden; }
 body {
-  background: var(--vscode-diffEditor-removedLineBackground, rgba(255,0,0,0.1));
+  background: ${lineBg};
   color: var(--vscode-editor-foreground);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: var(--vscode-editor-font-size, 13px);
   line-height: var(--vscode-editor-line-height, 1.5);
 }
 .line { white-space: pre; overflow: hidden; text-overflow: ellipsis; tab-size: ${tabSize}; }
+.word-changed { background: ${wordBg}; }
 </style>
 </head><body>${rows}</body></html>`;
-}
-
-// ── Action-bar inset ──────────────────────────────────────────────────────────
-function buildActionsHtml(filePath: string, hunkId: string): string {
-  return `<!DOCTYPE html><html><head>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; overflow: visible; }
-body { background: transparent; position: relative; }
-.bar {
-  position: absolute;
-  top: 3px; left: 4px;
-  display: flex; align-items: center; gap: 4px;
-}
-button {
-  background: var(--vscode-button-secondaryBackground, #3a3d41);
-  color: var(--vscode-button-secondaryForeground, #cccccc);
-  border: 1px solid var(--vscode-button-border, rgba(128,128,128,0.4));
-  border-radius: 2px;
-  padding: 0 6px; font-size: 10px;
-  font-family: var(--vscode-font-family, sans-serif);
-  cursor: pointer; height: 20px; line-height: 1;
-  display: inline-flex; align-items: center; white-space: nowrap;
-}
-button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }
-.btn-accept {
-  background: #2a7d3a;
-  color: #d4f0da;
-  border-color: rgba(63,185,80,0.3);
-}
-.btn-accept:hover { background: #256b31; }
-.btn-discard {
-  background: rgba(248,81,73,0.08);
-  color: #c97d7a;
-  border-color: rgba(248,81,73,0.25);
-}
-.btn-discard:hover { background: rgba(248,81,73,0.15); }
-</style>
-</head><body>
-<div class="bar">
-<button class="btn-accept" onclick="accept()">✓ Accept</button>
-<button class="btn-discard" onclick="discard()">↺ Discard</button>
-</div>
-<script>
-const vscode = acquireVsCodeApi();
-function accept() { vscode.postMessage({ command: 'accept', filePath: ${JSON.stringify(filePath)}, hunkId: ${JSON.stringify(hunkId)} }); }
-function discard() { vscode.postMessage({ command: 'discard', filePath: ${JSON.stringify(filePath)}, hunkId: ${JSON.stringify(hunkId)} }); }
-</script>
-</body></html>`;
 }
 
 interface HunkInset {
@@ -104,13 +86,52 @@ function insetCacheKey(afterLine: number, height: number): string {
 export class DecorationManager {
   // editorKey → ordered list of insets for that editor
   private insets: Map<string, HunkInset[]> = new Map();
-  private onAction: ((command: 'accept' | 'discard', filePath: string, hunkId: string) => void) | undefined;
+  // Decoration types are recreated when color overrides change. We key reuse on
+  // a signature so we only rebuild on real changes.
+  private addedLineDecoration: vscode.TextEditorDecorationType | undefined;
+  private addedWordDecoration: vscode.TextEditorDecorationType | undefined;
+  private deletionMarkerDecoration: vscode.TextEditorDecorationType | undefined;
+  private decorationColorSig: string = '';
 
-  constructor(
-    private stateManager: StateManager,
-    onAction?: (command: 'accept' | 'discard', filePath: string, hunkId: string) => void,
-  ) {
-    this.onAction = onAction;
+  constructor(private stateManager: StateManager) {}
+
+  private ensureDecorations(): void {
+    const c = this.stateManager.colors;
+    const sig = `${c.addedLineBackground}|${c.addedWordBackground}|${c.removedWordBackground}`;
+    if (sig === this.decorationColorSig
+      && this.addedLineDecoration
+      && this.addedWordDecoration
+      && this.deletionMarkerDecoration) return;
+    this.addedLineDecoration?.dispose();
+    this.addedWordDecoration?.dispose();
+    this.deletionMarkerDecoration?.dispose();
+    this.addedLineDecoration = vscode.window.createTextEditorDecorationType({
+      backgroundColor: c.addedLineBackground || new vscode.ThemeColor('diffEditor.insertedLineBackground'),
+      isWholeLine: true,
+    });
+    this.addedWordDecoration = vscode.window.createTextEditorDecorationType({
+      backgroundColor: c.addedWordBackground || new vscode.ThemeColor('diffEditor.insertedTextBackground'),
+    });
+    // Inline marker showing where a word was deleted from the new line.
+    // Colored with the inserted-text token so it visually matches the added
+    // word backgrounds in the same line.
+    const markerColor = c.addedWordBackground
+      ? sanitizeCssColor(c.addedWordBackground)
+      : 'var(--vscode-diffEditor-insertedTextBackground, rgba(137,221,255,0.5))';
+    // 1/4-ch wide bar, right-aligned in the gap between the preceding char
+    // and the anchor column. Implemented with an empty-content `before`
+    // pseudo-element sized via `width` + `backgroundColor`; the negative
+    // right margin cancels its footprint so surrounding text isn't pushed.
+    // Implemented as a left-border on a zero-width range: renders as a thin
+    // vertical line at the anchor column without displacing surrounding text,
+    // and works correctly at column 0 (unlike a `before` pseudo-element with
+    // negative left margin, which clips into the gutter at the line start).
+    this.deletionMarkerDecoration = vscode.window.createTextEditorDecorationType({
+      borderStyle: 'solid',
+      borderWidth: '0 0 0 2px',
+      borderColor: markerColor,
+    });
+    this.decorationColorSig = sig;
   }
 
   refresh(editors?: readonly vscode.TextEditor[]): void {
@@ -147,6 +168,7 @@ export class DecorationManager {
   }
 
   private applyToEditor(editor: vscode.TextEditor, diffPaths: Set<string>): void {
+    this.ensureDecorations();
     const filePath = editor.document.uri.fsPath;
     const editorKey = editor.document.uri.toString();
     const fileState = this.stateManager.getFile(filePath);
@@ -158,11 +180,15 @@ export class DecorationManager {
     if (!fileState || fileState.status !== 'reviewing' || skipInsets) {
       this.disposeInsetList(this.insets.get(editorKey) ?? []);
       this.insets.delete(editorKey);
-      editor.setDecorations(addedLineDecoration, []);
+      editor.setDecorations(this.addedLineDecoration!, []);
+      editor.setDecorations(this.addedWordDecoration!, []);
+      editor.setDecorations(this.deletionMarkerDecoration!, []);
       return;
     }
 
     const addedRanges: vscode.Range[] = [];
+    const addedWordRanges: vscode.Range[] = [];
+    const deletionMarkerRanges: vscode.Range[] = [];
     const tabSize = editor.options.tabSize as number || 4;
     const parsed = computeHunks(fileState.baseline, editor.document.getText());
 
@@ -185,63 +211,52 @@ export class DecorationManager {
         }
       }
 
+      for (const wr of hunk.addedWordRanges) {
+        const lineIdx = hunk.newStart - 1 + wr.lineOffset;
+        if (lineIdx < editor.document.lineCount) {
+          const lineLen = editor.document.lineAt(lineIdx).text.length;
+          const start = Math.min(wr.start, lineLen);
+          const end = Math.min(wr.end, lineLen);
+          if (end > start) {
+            addedWordRanges.push(new vscode.Range(lineIdx, start, lineIdx, end));
+          }
+        }
+      }
+
+      for (const m of hunk.deletionMarkers) {
+        const lineIdx = hunk.newStart - 1 + m.lineOffset;
+        if (lineIdx < editor.document.lineCount) {
+          const lineLen = editor.document.lineAt(lineIdx).text.length;
+          const col = Math.min(m.column, lineLen);
+          deletionMarkerRanges.push(new vscode.Range(lineIdx, col, lineIdx, col));
+        }
+      }
+
       // ── Inset placement strategy ──
       //
       // Layout order (top → bottom):
-      //   [deleted inset]   red lines showing removed content
+      //   [deleted inset]   red lines showing removed content (afterLine = newStart - 2)
+      //   [CodeLens row]    Accept / Discard (rendered by DiffCodeLensProvider, wrap-aware)
       //   [green lines]     added lines in the actual document
-      //   [action bar]      Accept / Discard buttons
+      //
+      // The action bar is no longer an inset — it's a CodeLens, anchored at the
+      // first green line of the hunk. CodeLens is wrap-aware, so it doesn't
+      // exhibit the editor-insets "between visual rows" bug.
       //
       // ── afterLine semantics ──
       // createWebviewTextEditorInset takes a 0-based line number.
       // Internally VSCode does +1 before storing as afterLineNumber (1-based).
       // afterLineNumber=0 means "above line 1" (file top).
       // So to place an inset above line 1 we must pass afterLine = -1.
-      //
-      // Normal case (newLines > 0):
-      //   deleted → afterLine = newStart - 2  (just above the green block)
-      //   action  → afterLine = newStart + newLines - 2  (just below the green block)
-      //   Different afterLines, so push order doesn't matter.
-      //
-      // Pure deletion (newLines == 0):
-      //   Both deleted and action use afterLine = newStart - 2 (same value).
-      //   VSCode stacks insets at the same afterLine with the FIRST-pushed on TOP.
-      //   So we push deleted first, then action, to render deleted above action.
 
       const hasDeletion = hunk.removedContent.length > 0;
-      const hasAddition = hunk.newLines > 0;
-
-      // afterLine for deleted inset: just above the green block (or above its insertion point)
-      const deletedAfterLine = hunk.newStart - 2; // may be -1 when newStart==1, that's correct
-
-      let actionAfterLine: number;
-      if (hasAddition) {
-        actionAfterLine = hunk.newStart + hunk.newLines - 2;
-      } else {
-        // Pure deletion: no green block. Action bar shares the same afterLine as the
-        // deleted inset. VSCode stacks insets at the same afterLine with the first-pushed
-        // on top, so we rely on push order below to place deleted above action.
-        actionAfterLine = deletedAfterLine;
-      }
-
-      // When multiple insets share the same afterLine, VSCode stacks them so that
-      // the FIRST pushed inset appears TOPMOST.  For the normal case (deletion above
-      // green lines, action below), they have different afterLines so push order
-      // doesn't matter.  For pure deletion (same afterLine), we push deleted first,
-      // then action, so deleted renders above action.
-
       if (hasDeletion) {
         specs.push({
-          afterLine: Math.max(-1, deletedAfterLine),
+          afterLine: Math.max(-1, hunk.newStart - 2),
           height: hunk.removedContent.length,
-          html: buildDeletedHtml(hunk.removedContent, tabSize),
+          html: buildDeletedHtml(hunk.removedContent, tabSize, hunk.removedWordRanges, this.stateManager.colors),
         });
       }
-      specs.push({
-        afterLine: actionAfterLine,
-        height: 2,
-        html: buildActionsHtml(filePath, id),
-      });
     }
 
     // Reuse existing insets when cache keys match to avoid flicker
@@ -273,7 +288,9 @@ export class DecorationManager {
       }
     }
 
-    editor.setDecorations(addedLineDecoration, addedRanges);
+    editor.setDecorations(this.addedLineDecoration!, addedRanges);
+    editor.setDecorations(this.addedWordDecoration!, addedWordRanges);
+    editor.setDecorations(this.deletionMarkerDecoration!, deletionMarkerRanges);
     if (nextInsets.length > 0) {
       this.insets.set(editorKey, nextInsets);
     } else {
@@ -294,11 +311,9 @@ export class DecorationManager {
         editor, afterLine, height, { enableScripts: true }
       ) as vscode.WebviewEditorInset;
       inset.webview.html = html;
-      const disposable = inset.webview.onDidReceiveMessage((msg: any) => {
-        if (msg.command === 'accept' || msg.command === 'discard') {
-          this.onAction?.(msg.command, msg.filePath, msg.hunkId);
-        }
-      });
+      // The deleted-content inset doesn't post messages; subscribe to a no-op
+      // disposable so the existing HunkInset shape (with disposable) stays valid.
+      const disposable = inset.webview.onDidReceiveMessage(() => { /* no-op */ });
       const entry: HunkInset = {
         inset, disposable, cacheKey, disposed: false,
         disposeListener: inset.onDidDispose(() => {
@@ -318,7 +333,8 @@ export class DecorationManager {
   }
 
   dispose(): void {
-    addedLineDecoration.dispose();
+    this.addedLineDecoration?.dispose();
+    this.addedWordDecoration?.dispose();
     for (const list of this.insets.values()) {
       this.disposeInsetList(list);
     }
