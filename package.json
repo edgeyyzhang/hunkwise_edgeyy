@@ -1,13 +1,13 @@
 {
-  "name": "hunkwise",
-  "publisher": "molon",
-  "displayName": "hunkwise",
+  "name": "hunkwise-edgeyy",
+  "publisher": "edgeyyzhang",
+  "displayName": "hunkwise (edgeyy fork)",
   "description": "Per-hunk Accept/Discard for any file change",
-  "version": "0.0.29",
+  "version": "0.0.30",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/molon/hunkwise"
+    "url": "https://github.com/edgeyyzhang/hunkwise_edgeyy"
   },
   "engines": {
     "vscode": "^1.90.0"
