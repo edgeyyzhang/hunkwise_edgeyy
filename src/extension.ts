@@ -5,8 +5,10 @@ import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { DecorationManager } from './decorationManager';
 import { ReviewPanel } from './reviewPanel';
-import { registerCommands, acceptHunk, discardHunk } from './commands';
+import { registerCommands, acceptHunk, discardHunk, acceptCellHunk, discardCellHunk } from './commands';
 import { DiffCodeLensProvider } from './diffCodeLens';
+import { CellRemovedHoverProvider } from './cellHoverProvider';
+import { isNotebookFile } from './notebookCells';
 import { initLog, log } from './log';
 
 export async function activate(context: vscode.ExtensionContext): Promise<{ getReviewPanel: () => ReviewPanel | undefined; getStateManager: () => StateManager | undefined; getFileWatcher: () => FileWatcher | undefined }> {
@@ -65,7 +67,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
           if (!fileState || fileState.status !== 'reviewing') {
             await vscode.window.tabGroups.close(tab);
             if (fs.existsSync(filePath)) {
-              await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+              if (isNotebookFile(filePath)) {
+                await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(filePath), 'jupyter-notebook');
+              } else {
+                await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+              }
             }
           }
           continue;
@@ -112,12 +118,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
       diffCodeLensProvider?.fire();
     }),
     vscode.workspace.onDidChangeTextDocument(e => {
-      if (e.document.uri.scheme !== 'file') return;
+      if (e.document.uri.scheme !== 'file' && e.document.uri.scheme !== 'vscode-notebook-cell') return;
       const editor = vscode.window.visibleTextEditors.find(
-        ed => ed.document.uri.fsPath === e.document.uri.fsPath
+        ed => ed.document.uri.toString() === e.document.uri.toString()
       );
       if (editor) decorationManager?.refresh([editor]);
       reviewPanel?.refresh();
+    }),
+    vscode.workspace.onDidChangeNotebookDocument(e => {
+      // Cell add/move/delete affects per-cell hunks: refresh decorations on visible cell
+      // editors of the changed notebook, refresh the panel, and re-fire CodeLens.
+      const nbPath = e.notebook.uri.fsPath;
+      const cellEditors = vscode.window.visibleTextEditors.filter(
+        ed => ed.document.uri.scheme === 'vscode-notebook-cell' && ed.document.uri.fsPath === nbPath
+      );
+      if (cellEditors.length > 0) decorationManager?.refresh(cellEditors);
+      reviewPanel?.refresh();
+      diffCodeLensProvider?.fire();
     }),
   );
 
@@ -133,11 +150,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<{ getR
   context.subscriptions.push(
     diffCodeLensProvider,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, diffCodeLensProvider),
+    vscode.languages.registerCodeLensProvider({ scheme: 'vscode-notebook-cell' }, diffCodeLensProvider),
+    vscode.languages.registerHoverProvider({ scheme: 'vscode-notebook-cell' }, new CellRemovedHoverProvider(stateManager)),
     vscode.commands.registerCommand('hunkwise.codeLensAcceptHunk', (filePath: string, hId: string) => {
       acceptHunk(stateManager, filePath, hId, () => { onStateChanged(); fireBaselineChange(filePath); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
     }),
     vscode.commands.registerCommand('hunkwise.codeLensDiscardHunk', (filePath: string, hId: string) => {
       discardHunk(stateManager, fileWatcher, filePath, hId, () => { onStateChanged(); void closeStaleTabs().catch(err => log(`closeStaleTabs: ${err}`)); }, 'codeLens');
+    }),
+    vscode.commands.registerCommand('hunkwise.codeLensAcceptCellHunk', (notebookPath: string, cellKey: string, hId: string) => {
+      acceptCellHunk(stateManager, notebookPath, cellKey, hId, () => { onStateChanged(); fireBaselineChange(notebookPath); });
+    }),
+    vscode.commands.registerCommand('hunkwise.codeLensDiscardCellHunk', async (notebookPath: string, cellKey: string, hId: string) => {
+      await discardCellHunk(stateManager, fileWatcher, notebookPath, cellKey, hId, () => onStateChanged());
+    }),
+    vscode.commands.registerCommand('hunkwise.showRemovedContent', async (line: number) => {
+      // Move cursor to the hunk's anchor line and trigger the editor hover popup.
+      // CellRemovedHoverProvider populates the popup with the full removed content.
+      // Note: other hover providers (e.g. Pylance) for the same line will also fire and stack.
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.document.uri.scheme !== 'vscode-notebook-cell') return;
+      const target = new vscode.Position(Math.max(0, Math.min(line, editor.document.lineCount - 1)), 0);
+      editor.selection = new vscode.Selection(target, target);
+      await vscode.commands.executeCommand('editor.action.showHover');
     }),
   );
 

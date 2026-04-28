@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { StateManager } from './stateManager';
 import { FileWatcher } from './fileWatcher';
 import { computeHunks, hunkId } from './diffEngine';
+import { isNotebookFile } from './notebookCells';
 import { log } from './log';
 
 import {
@@ -273,6 +274,11 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         break;
       case 'openFile':
         if (msg.filePath) {
+          if (isNotebookFile(msg.filePath)) {
+            log(`openFile(${path.basename(msg.filePath)}): opening as notebook`);
+            await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(msg.filePath), 'jupyter-notebook');
+            break;
+          }
           log(`openFile(${path.basename(msg.filePath)}): opening in ${this.stateManager.useDiffEditor ? 'diffEditor' : 'normalEditor'}`);
           if (this.stateManager.useDiffEditor) {
             await this.openDiffEditor(msg.filePath);
@@ -300,6 +306,11 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
         break;
       case 'jumpToHunk':
         if (msg.filePath && msg.hunkId) {
+          if (isNotebookFile(msg.filePath)) {
+            log(`jumpToHunk(${path.basename(msg.filePath)}): notebook — opening as notebook`);
+            await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(msg.filePath), 'jupyter-notebook');
+            break;
+          }
           log(`jumpToHunk(${path.basename(msg.filePath)}): hunkId=${msg.hunkId}, opening in ${this.stateManager.useDiffEditor ? 'diffEditor' : 'normalEditor'}`);
           if (this.stateManager.useDiffEditor) {
             await this.openDiffEditor(msg.filePath, msg.hunkId);
@@ -322,6 +333,11 @@ export class ReviewPanel implements vscode.WebviewViewProvider {
   }
 
   async openDiffEditor(filePath: string, targetHunkId?: string): Promise<void> {
+    if (isNotebookFile(filePath)) {
+      // Notebook diff against text-baseline doesn't render correctly; fall back to opening the notebook.
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(filePath), 'jupyter-notebook');
+      return;
+    }
     const fileName = path.basename(filePath);
     const baselineUri = vscode.Uri.file(filePath).with({ scheme: 'hunkwise-baseline' });
     const currentUri = vscode.Uri.file(filePath);

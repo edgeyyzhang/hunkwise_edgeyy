@@ -7,6 +7,14 @@ import { ReviewPanel } from './reviewPanel';
 import { computeHunks, hunkId, ParsedHunk } from './diffEngine';
 import { upsertGitignore } from './gitignoreManager';
 import { log } from './log';
+import {
+  cellKeyOf,
+  findCellRef,
+  getBaselineCellSource,
+  isNotebookFile,
+  setBaselineCellSource,
+  notebookHasAnyHunks,
+} from './notebookCells';
 
 export function registerCommands(
   context: vscode.ExtensionContext,
@@ -46,12 +54,20 @@ export function registerCommands(
     vscode.commands.registerCommand('hunkwise.acceptHunkAtCursor', () => {
       const target = resolveHunkAtCursor(stateManager);
       if (!target) return;
-      acceptHunk(stateManager, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+      if (target.kind === 'cell') {
+        acceptCellHunk(stateManager, target.notebookPath, target.cellKey, hunkId(target.hunk), onStateChanged);
+      } else {
+        acceptHunk(stateManager, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+      }
     }),
     vscode.commands.registerCommand('hunkwise.discardHunkAtCursor', async () => {
       const target = resolveHunkAtCursor(stateManager);
       if (!target) return;
-      await discardHunk(stateManager, fileWatcher, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+      if (target.kind === 'cell') {
+        await discardCellHunk(stateManager, fileWatcher, target.notebookPath, target.cellKey, hunkId(target.hunk), onStateChanged);
+      } else {
+        await discardHunk(stateManager, fileWatcher, target.filePath, hunkId(target.hunk), onStateChanged, 'cursor-shortcut');
+      }
     }),
     vscode.commands.registerCommand('hunkwise.acceptAll', async () => {
       const fileCount = stateManager.getAllFiles().size;
@@ -338,15 +354,72 @@ export function acceptHunk(
   log(`acceptHunk(${basename}): done`);
 }
 
+type HunkAtCursor =
+  | { kind: 'file'; filePath: string; hunk: ParsedHunk }
+  | { kind: 'cell'; notebookPath: string; cellKey: string; hunk: ParsedHunk };
+
 // Locate the hunk most relevant to the active editor's cursor. Picks a hunk
 // whose green block (added lines) contains the cursor line; otherwise the
-// nearest hunk by line distance. Returns undefined and surfaces a friendly
-// message if there's no active file, no fileState, or no hunks.
-function resolveHunkAtCursor(
-  stateManager: StateManager,
-): { filePath: string; hunk: ParsedHunk } | undefined {
-  const editor = vscode.window.activeTextEditor;
-  if (!editor || editor.document.uri.scheme !== 'file') {
+// nearest hunk by line distance. Handles both file editors and notebook cell
+// editors. Returns undefined and surfaces a friendly message if there's no
+// active editor, no fileState, or no hunks.
+function pickHunkAtCursorLine(hunks: ParsedHunk[], cursorLine: number): ParsedHunk | undefined {
+  for (const h of hunks) {
+    const start0 = h.newStart - 1;
+    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
+    if (cursorLine >= start0 && cursorLine <= end0) return h;
+  }
+  let best: ParsedHunk | undefined;
+  let bestDist = Infinity;
+  for (const h of hunks) {
+    const start0 = h.newStart - 1;
+    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
+    const dist = cursorLine < start0 ? start0 - cursorLine : cursorLine - end0;
+    if (dist < bestDist) { bestDist = dist; best = h; }
+  }
+  return best;
+}
+
+function resolveHunkAtCursor(stateManager: StateManager): HunkAtCursor | undefined {
+  let editor = vscode.window.activeTextEditor;
+  // Fallback: when focus is on notebook chrome (not inside a cell editor),
+  // activeTextEditor is undefined. Use the active notebook editor's selected cell.
+  if (!editor) {
+    const nbEditor = vscode.window.activeNotebookEditor;
+    const sel = nbEditor?.selections?.[0];
+    if (nbEditor && sel) {
+      const cell = nbEditor.notebook.cellAt(sel.start);
+      const cellEditor = vscode.window.visibleTextEditors.find(e => e.document === cell.document);
+      if (cellEditor) editor = cellEditor;
+    }
+  }
+  if (!editor) {
+    vscode.window.showInformationMessage('hunkwise: no active file.');
+    return undefined;
+  }
+
+  if (editor.document.uri.scheme === 'vscode-notebook-cell') {
+    const ref = findCellRef(editor.document);
+    if (!ref || !isNotebookFile(ref.notebookPath)) {
+      vscode.window.showInformationMessage('hunkwise: no active file.');
+      return undefined;
+    }
+    const fileState = stateManager.getFile(ref.notebookPath);
+    if (!fileState) {
+      vscode.window.showInformationMessage('hunkwise: this file has no pending changes.');
+      return undefined;
+    }
+    const baselineSource = getBaselineCellSource(fileState.baseline, ref.cellKey);
+    const hunks = computeHunks(baselineSource, editor.document.getText());
+    if (hunks.length === 0) {
+      vscode.window.showInformationMessage('hunkwise: no hunks in this cell.');
+      return undefined;
+    }
+    const hunk = pickHunkAtCursorLine(hunks, editor.selection.active.line);
+    return hunk ? { kind: 'cell', notebookPath: ref.notebookPath, cellKey: ref.cellKey, hunk } : undefined;
+  }
+
+  if (editor.document.uri.scheme !== 'file') {
     vscode.window.showInformationMessage('hunkwise: no active file.');
     return undefined;
   }
@@ -361,21 +434,8 @@ function resolveHunkAtCursor(
     vscode.window.showInformationMessage('hunkwise: no hunks in this file.');
     return undefined;
   }
-  const cursorLine = editor.selection.active.line; // 0-based
-  for (const h of hunks) {
-    const start0 = h.newStart - 1;
-    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
-    if (cursorLine >= start0 && cursorLine <= end0) return { filePath, hunk: h };
-  }
-  let best: ParsedHunk | undefined;
-  let bestDist = Infinity;
-  for (const h of hunks) {
-    const start0 = h.newStart - 1;
-    const end0 = h.newLines > 0 ? start0 + h.newLines - 1 : start0;
-    const dist = cursorLine < start0 ? start0 - cursorLine : cursorLine - end0;
-    if (dist < bestDist) { bestDist = dist; best = h; }
-  }
-  return best ? { filePath, hunk: best } : undefined;
+  const hunk = pickHunkAtCursorLine(hunks, editor.selection.active.line);
+  return hunk ? { kind: 'file', filePath, hunk } : undefined;
 }
 
 /** Reveal the next hunk in the editor after an accept/discard operation. */
@@ -465,6 +525,130 @@ export async function discardHunk(
     log(`discardHunk(${basename}): done`);
   } finally {
     fileWatcher.clearSelfEdit(filePath);
+  }
+}
+
+function findCellByKey(nb: vscode.NotebookDocument, cellKey: string): vscode.NotebookCell | undefined {
+  const cells = nb.getCells();
+  if (cellKey.startsWith('__idx_')) {
+    const i = parseInt(cellKey.slice(6), 10);
+    return Number.isFinite(i) && i >= 0 && i < cells.length ? cells[i] : undefined;
+  }
+  for (let i = 0; i < cells.length; i++) {
+    if (cellKeyOf(cells[i], i) === cellKey) return cells[i];
+  }
+  return undefined;
+}
+
+function readDiskOrEmpty(filePath: string): string {
+  try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
+}
+
+export function acceptCellHunk(
+  stateManager: StateManager,
+  notebookPath: string,
+  cellKey: string,
+  id: string,
+  onStateChanged: () => void,
+): void {
+  const basename = path.basename(notebookPath);
+  log(`acceptCellHunk(${basename} cell=${cellKey}): hunkId=${id}`);
+
+  const fileState = stateManager.getFile(notebookPath);
+  if (!fileState) { log(`acceptCellHunk(${basename}): no fileState, skip`); return; }
+
+  const nb = vscode.workspace.notebookDocuments.find(n => n.uri.fsPath === notebookPath);
+  if (!nb) { log(`acceptCellHunk(${basename}): notebook not open, skip`); return; }
+  const cell = findCellByKey(nb, cellKey);
+  if (!cell) { log(`acceptCellHunk(${basename}): cell ${cellKey} not found, skip`); return; }
+
+  const baselineSource = getBaselineCellSource(fileState.baseline, cellKey);
+  const current = cell.document.getText();
+  const hunks = computeHunks(baselineSource, current);
+  const hunk = hunks.find(h => hunkId(h) === id);
+  if (!hunk) { log(`acceptCellHunk(${basename}): hunk not found, skip`); return; }
+
+  const baseLines = (baselineSource ?? '').split('\n');
+  const curLines = current.split('\n');
+  const newCellSource = [
+    ...baseLines.slice(0, hunk.oldStart - 1),
+    ...curLines.slice(hunk.newStart - 1, hunk.newStart - 1 + hunk.newLines),
+    ...baseLines.slice(hunk.oldStart - 1 + hunk.oldLines),
+  ].join('\n');
+
+  const baselineJson = fileState.baseline ?? '{"cells":[]}';
+  const newBaselineJson = setBaselineCellSource(baselineJson, cellKey, newCellSource);
+
+  const stillHasHunks = notebookHasAnyHunks(nb, newBaselineJson);
+  if (!stillHasHunks) {
+    // Snapshot disk content as new baseline so future diffs start from a clean
+    // text-equal state (notebook serializer formatting may differ from our JSON.stringify).
+    const diskContent = readDiskOrEmpty(notebookPath);
+    log(`acceptCellHunk(${basename}): no remaining hunks, exitReviewing`);
+    stateManager.exitReviewing(notebookPath, diskContent);
+  } else {
+    stateManager.setFile(notebookPath, { status: 'reviewing', baseline: newBaselineJson });
+  }
+  onStateChanged();
+}
+
+export async function discardCellHunk(
+  stateManager: StateManager,
+  fileWatcher: FileWatcher,
+  notebookPath: string,
+  cellKey: string,
+  id: string,
+  onStateChanged: () => void,
+): Promise<void> {
+  const basename = path.basename(notebookPath);
+  log(`discardCellHunk(${basename} cell=${cellKey}): hunkId=${id}`);
+
+  const fileState = stateManager.getFile(notebookPath);
+  if (!fileState) { log(`discardCellHunk(${basename}): no fileState, skip`); return; }
+
+  const nb = vscode.workspace.notebookDocuments.find(n => n.uri.fsPath === notebookPath);
+  if (!nb) { log(`discardCellHunk(${basename}): notebook not open, skip`); return; }
+  const cell = findCellByKey(nb, cellKey);
+  if (!cell) { log(`discardCellHunk(${basename}): cell ${cellKey} not found, skip`); return; }
+
+  const baselineSource = getBaselineCellSource(fileState.baseline, cellKey) ?? '';
+  const current = cell.document.getText();
+  const hunk = computeHunks(baselineSource, current).find(h => hunkId(h) === id);
+  if (!hunk) { log(`discardCellHunk(${basename}): hunk not found, skip`); return; }
+
+  const baseLines = baselineSource.split('\n');
+  const restoreLines = baseLines.slice(hunk.oldStart - 1, hunk.oldStart - 1 + hunk.oldLines);
+  const replacement = restoreLines.length > 0 ? restoreLines.join('\n') + '\n' : '';
+
+  const startPos = new vscode.Position(hunk.newStart - 1, 0);
+  let endPos: vscode.Position;
+  if (hunk.newLines === 0) {
+    endPos = startPos;
+  } else {
+    const lastNewLine = hunk.newStart - 1 + hunk.newLines - 1;
+    endPos = lastNewLine < cell.document.lineCount - 1
+      ? new vscode.Position(lastNewLine + 1, 0)
+      : new vscode.Position(lastNewLine, cell.document.lineAt(lastNewLine).text.length);
+  }
+
+  fileWatcher.markSelfEdit(notebookPath);
+  try {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(cell.document.uri, new vscode.Range(startPos, endPos), replacement);
+    const applied = await vscode.workspace.applyEdit(edit);
+    log(`discardCellHunk(${basename}): applyEdit=${applied}`);
+    if (!applied) return;
+    try { await vscode.workspace.save(nb.uri); } catch (err) { log(`discardCellHunk(${basename}): save failed: ${err}`); }
+
+    const stillHasHunks = notebookHasAnyHunks(nb, fileState.baseline);
+    if (!stillHasHunks) {
+      const diskContent = readDiskOrEmpty(notebookPath);
+      log(`discardCellHunk(${basename}): no remaining hunks, exitReviewing`);
+      stateManager.exitReviewing(notebookPath, diskContent);
+    }
+    onStateChanged();
+  } finally {
+    fileWatcher.clearSelfEdit(notebookPath);
   }
 }
 

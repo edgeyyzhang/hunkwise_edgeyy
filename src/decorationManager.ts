@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { StateManager } from './stateManager';
 import { computeHunks, hunkId, WordRange } from './diffEngine';
 import { ColorOverrides } from './hunkwiseGit';
+import { findCellRef, getBaselineCellSource, isNotebookFile } from './notebookCells';
 import { log } from './log';
 
 // Strip CSS-breaking characters so user-supplied color strings can't escape an
@@ -167,9 +168,72 @@ export class DecorationManager {
     return paths;
   }
 
+  private clearAllLineDecorations(editor: vscode.TextEditor): void {
+    editor.setDecorations(this.addedLineDecoration!, []);
+    editor.setDecorations(this.addedWordDecoration!, []);
+    editor.setDecorations(this.deletionMarkerDecoration!, []);
+  }
+
+  private applyToCellEditor(editor: vscode.TextEditor): void {
+    const ref = findCellRef(editor.document);
+    if (!ref || !isNotebookFile(ref.notebookPath)) {
+      this.clearAllLineDecorations(editor);
+      return;
+    }
+    const fileState = this.stateManager.getFile(ref.notebookPath);
+    if (!fileState || fileState.status !== 'reviewing' || !this.stateManager.showInlineDecorations) {
+      this.clearAllLineDecorations(editor);
+      return;
+    }
+
+    const baselineSource = getBaselineCellSource(fileState.baseline, ref.cellKey);
+    const hunks = computeHunks(baselineSource, editor.document.getText());
+
+    const addedRanges: vscode.Range[] = [];
+    const addedWordRanges: vscode.Range[] = [];
+    const deletionMarkerRanges: vscode.Range[] = [];
+
+    for (const hunk of hunks) {
+      for (let i = 0; i < hunk.newLines; i++) {
+        const lineIdx = hunk.newStart - 1 + i;
+        if (lineIdx < editor.document.lineCount) {
+          addedRanges.push(editor.document.lineAt(lineIdx).range);
+        }
+      }
+      for (const wr of hunk.addedWordRanges) {
+        const lineIdx = hunk.newStart - 1 + wr.lineOffset;
+        if (lineIdx < editor.document.lineCount) {
+          const lineLen = editor.document.lineAt(lineIdx).text.length;
+          const start = Math.min(wr.start, lineLen);
+          const end = Math.min(wr.end, lineLen);
+          if (end > start) addedWordRanges.push(new vscode.Range(lineIdx, start, lineIdx, end));
+        }
+      }
+      for (const m of hunk.deletionMarkers) {
+        const lineIdx = hunk.newStart - 1 + m.lineOffset;
+        if (lineIdx < editor.document.lineCount) {
+          const lineLen = editor.document.lineAt(lineIdx).text.length;
+          const col = Math.min(m.column, lineLen);
+          deletionMarkerRanges.push(new vscode.Range(lineIdx, col, lineIdx, col));
+        }
+      }
+    }
+
+    editor.setDecorations(this.addedLineDecoration!, addedRanges);
+    editor.setDecorations(this.addedWordDecoration!, addedWordRanges);
+    editor.setDecorations(this.deletionMarkerDecoration!, deletionMarkerRanges);
+  }
+
   private applyToEditor(editor: vscode.TextEditor, diffPaths: Set<string>): void {
     this.ensureDecorations();
+    if (editor.document.uri.scheme === 'vscode-notebook-cell') {
+      this.applyToCellEditor(editor);
+      return;
+    }
+    if (editor.document.uri.scheme !== 'file') return;
     const filePath = editor.document.uri.fsPath;
+    // Notebook files render via the notebook editor (cells handled above); skip text-file path.
+    if (isNotebookFile(filePath)) return;
     const editorKey = editor.document.uri.toString();
     const fileState = this.stateManager.getFile(filePath);
 
