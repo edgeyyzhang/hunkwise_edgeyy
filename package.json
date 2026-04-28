@@ -3,7 +3,7 @@
   "publisher": "edgeyyzhang",
   "displayName": "hunkwise (edgeyy fork)",
   "description": "Per-hunk Accept/Discard for any file change",
-  "version": "0.0.42",
+  "version": "0.0.45",
   "license": "MIT",
   "repository": {
     "type": "git",

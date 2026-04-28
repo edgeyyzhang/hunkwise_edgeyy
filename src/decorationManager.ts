@@ -57,15 +57,18 @@ function buildDeletedHtml(lines: string[], tabSize: number, wordRanges: WordRang
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; overflow: hidden; }
+html, body { height: 100%; }
+html { overflow: hidden; }
 body {
+  overflow-x: auto;
+  overflow-y: hidden;
   background: ${lineBg};
   color: var(--vscode-editor-foreground);
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: var(--vscode-editor-font-size, 13px);
   line-height: var(--vscode-editor-line-height, 1.5);
 }
-.line { white-space: pre; overflow: hidden; text-overflow: ellipsis; tab-size: ${tabSize}; }
+.line { white-space: pre; tab-size: ${tabSize}; }
 .word-changed { background: ${wordBg}; }
 </style>
 </head><body>${rows}</body></html>`;
@@ -149,7 +152,10 @@ export class DecorationManager {
     for (const h of list) {
       h.disposeListener.dispose();
       h.disposable.dispose();
-      if (!h.disposed) h.inset.dispose();
+      if (!h.disposed) {
+        try { h.inset.webview.html = ''; } catch { /* webview already gone */ }
+        h.inset.dispose();
+      }
     }
   }
 
@@ -343,12 +349,17 @@ export class DecorationManager {
       }
     }
 
-    // Dispose leftover insets not reused
+    // Dispose leftover insets not reused. Blank the HTML first so the colored
+    // block disappears immediately, even while the underlying webview teardown
+    // is still in flight (disposal is async at the renderer-process boundary).
     for (const leftover of existing) {
       if (leftover) {
         leftover.disposeListener.dispose();
         leftover.disposable.dispose();
-        if (!leftover.disposed) leftover.inset.dispose();
+        if (!leftover.disposed) {
+          try { leftover.inset.webview.html = ''; } catch { /* webview already gone */ }
+          leftover.inset.dispose();
+        }
       }
     }
 

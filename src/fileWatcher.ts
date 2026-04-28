@@ -9,6 +9,14 @@ import { computeHunks } from './diffEngine';
 import { log } from './log';
 import { normalizePath } from './pathNormalize';
 
+// Strip BOM and normalize line endings. Used only for the user-vs-external
+// save discrimination; the actual baseline content is stored as-read so future
+// diffs preserve the file's real bytes.
+function normalizeForCompare(s: string): string {
+  if (s.length > 0 && s.charCodeAt(0) === 0xFEFF) s = s.slice(1);
+  return s.replace(/\r\n/g, '\n');
+}
+
 // Transform gitignore rules from a sub-directory so they work in a single
 // root-level matcher. Adds the directory's relative path as prefix, handling
 // anchored (/), unanchored (any-depth), negation (!) and comment lines.
@@ -300,7 +308,10 @@ export class FileWatcher {
 
     // Check if this was a manual create in VSCode (editor buffer matches disk)
     const openDoc = vscode.workspace.textDocuments.find(d => normalizePath(d.uri.fsPath) === filePath);
-    const bufferMatch = openDoc ? openDoc.getText() === diskContent : false;
+    const bufferMatch = openDoc
+      ? (openDoc.getText() === diskContent
+        || normalizeForCompare(openDoc.getText()) === normalizeForCompare(diskContent))
+      : false;
     log(`onDiskCreate(${basename}): openDoc=${!!openDoc}, bufferMatch=${bufferMatch}`);
     if (openDoc && bufferMatch) {
       // User created/saved this file in VSCode — snapshot as baseline, no hunk
@@ -430,12 +441,21 @@ export class FileWatcher {
     const git = this.stateManager.git;
     if (!git) return;
 
-    // Check if this was a manual save in VSCode (editor buffer matches disk)
+    // Check if this was a manual save in VSCode (editor buffer matches disk).
+    // Compare with line-ending and BOM normalization so a stray CRLF/LF or BOM
+    // mismatch between the in-memory buffer and the on-disk bytes doesn't
+    // misclassify a user save as an external write.
     const openDoc = vscode.workspace.textDocuments.find(d => normalizePath(d.uri.fsPath) === filePath);
-    if (openDoc && openDoc.getText() === diskContent) {
-      // User saved in VSCode — accept into baseline, no hunk
-      this.stateManager.snapshotFile(filePath, diskContent);
-      return;
+    if (openDoc) {
+      const buf = openDoc.getText();
+      const matchesRaw = buf === diskContent;
+      const matchesNormalized = matchesRaw || normalizeForCompare(buf) === normalizeForCompare(diskContent);
+      if (matchesNormalized) {
+        log(`onDiskChange(${path.basename(filePath)}): user save (matchesRaw=${matchesRaw}), snapshot baseline`);
+        this.stateManager.snapshotFile(filePath, diskContent);
+        return;
+      }
+      log(`onDiskChange(${path.basename(filePath)}): buffer differs from disk (buf.len=${buf.length}, disk.len=${diskContent.length}, openDoc.isDirty=${openDoc.isDirty})`);
     }
 
     // External change — compare against hunkwise baseline
